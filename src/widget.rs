@@ -158,6 +158,20 @@ impl PackageManager {
       .collect()
   }
 
+  /// Select a package by name, even one that isn't in the available pool
+  ///
+  /// The pool can be empty or incomplete when nixpkgs hasn't been fetched, so
+  /// a hand-typed name still has to be selectable. Unknown packages sort last.
+  pub fn add_selected(&mut self, package: &str) -> bool {
+    if self.selected.contains_key(package) {
+      return false;
+    }
+    let idx = self.available.remove(package).unwrap_or(usize::MAX);
+    self.selected.insert(package.to_string(), idx);
+    self.cached_filtered.remove(package);
+    true
+  }
+
   pub fn contains_available(&self, package: &str) -> bool {
     self.available.contains_key(package)
   }
@@ -1909,6 +1923,10 @@ impl PackagePicker {
         "Search bar filters packages in real-time as you type.",
       )],
       vec![(None, "Filter persists when adding/removing packages.")],
+      vec![(
+        None,
+        "With no matches, Enter in the search bar adds the name as typed.",
+      )],
     ]);
     let help_modal = HelpModal::new("Package Picker", help_content);
 
@@ -1956,6 +1974,37 @@ impl PackagePicker {
       self.package_manager.get_available_packages()
     };
     self.available.set_items(items);
+  }
+
+  /// Swap in a new pool of available packages, keeping the current selection
+  ///
+  /// The nixpkgs list is fetched in the background, so it often lands after
+  /// this widget is already on screen.
+  pub fn refresh_available(&mut self, available_pkgs: Vec<String>, title_available: &str) {
+    let selected = self.package_manager.get_selected_packages();
+    self.package_manager = PackageManager::new(available_pkgs, selected.clone());
+    self.selected.set_items(selected);
+    self.available.title = title_available.to_string();
+    self.set_filter(self.current_filter.clone());
+  }
+
+  /// Select whatever the user typed into the search bar
+  ///
+  /// Returns false if there is nothing to add.
+  fn add_typed_package(&mut self) -> bool {
+    let Some(name) = self.current_filter.clone() else {
+      return false;
+    };
+    let name = name.trim();
+    if name.is_empty() || !self.package_manager.add_selected(name) {
+      return false;
+    }
+    self
+      .selected
+      .set_items(self.package_manager.get_selected_packages());
+    self.search_bar.clear();
+    self.set_filter(None);
+    true
   }
 }
 
@@ -2010,7 +2059,18 @@ impl ConfigWidget for PackagePicker {
     }
     if self.search_bar.is_focused() {
       match event.code {
-        KeyCode::Enter | KeyCode::Tab => {
+        KeyCode::Enter => {
+          // With nothing to pick from, Enter adds whatever was typed - that's
+          // the only way to select a package while the list is still loading
+          // or if fetching it failed outright
+          if self.available.is_empty() {
+            self.add_typed_package();
+          } else {
+            self.focus_available();
+          }
+          Signal::Wait
+        }
+        KeyCode::Tab => {
           self.focus_available();
           Signal::Wait
         }

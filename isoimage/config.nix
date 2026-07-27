@@ -1,10 +1,10 @@
-{ pkgs, modulesPath, nixosWizard, ... }: {
+{ config, pkgs, modulesPath, nixosWizard, system, ... }: {
   imports = [
     "${modulesPath}/installer/cd-dvd/installation-cd-minimal.nix"
   ];
 
   environment.etc."issue".text = ''
-                                    \e[92m<<< NixOS 25.11.20250728.dc96378 \r (\m) - \l >>>\e[0m
+                                    \e[92m<<< NixOS ${config.system.nixos.label} \r (\m) - \l >>>\e[0m
 
              \e[38;5;27m▓▓▓▓       \e[38;5;81m▒▒▒▒    ▒▒▒▒
               \e[38;5;27m▓▓▓▓       \e[38;5;81m▒▒▒▒  ▒▒▒▒            \e[38;5;27m                       ▓▓▓
@@ -41,6 +41,6 @@ Run `\e[1;35mnixos-help\e[0m` for the NixOS manual.
 
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  nixpkgs.hostPlatform = "x86_64-linux";
+  nixpkgs.hostPlatform = system;
   networking.networkmanager.enable = true;
 }

@@ -1,7 +1,10 @@
 use ratatui::{crossterm::event::KeyCode, layout::Constraint, text::Line};
 
 use crate::{
-  installer::{HIGHLIGHT, Installer, Page, Signal, systempkgs::get_available_pkgs},
+  installer::{
+    HIGHLIGHT, Installer, Page, Signal,
+    systempkgs::{available_pkgs_title, get_available_pkgs, pkg_list_generation},
+  },
   split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_up,
   widget::{
     Button, ConfigWidget, HelpModal, InfoBox, LineEditor, PackagePicker, StrList, TableWidget,
@@ -1670,9 +1673,22 @@ pub struct ConfigureHomeManager {
   pub package_picker: PackagePicker,
   pub selected_user: usize,
   pub confirming_disable: bool,
+  pkg_generation: u64,
 }
 
 impl ConfigureHomeManager {
+  /// Pick up the nixpkgs list if the background fetch landed while this page
+  /// was already open
+  fn sync_pkg_list(&mut self) {
+    let generation = pkg_list_generation();
+    if generation != self.pkg_generation {
+      self.pkg_generation = generation;
+      self
+        .package_picker
+        .refresh_available(get_available_pkgs(), &available_pkgs_title());
+    }
+  }
+
   pub fn new(selected_user: usize, existing_config: Option<HomeManagerCfg>) -> Self {
     let buttons = vec![
       Box::new(Button::new("Yes")) as Box<dyn ConfigWidget>,
@@ -1687,11 +1703,11 @@ impl ConfigureHomeManager {
     let mut configuration_options = WidgetBox::button_menu(config_options);
     if let Some(cfg) = existing_config {
       configuration_options.focus();
-      let pkgs = get_available_pkgs().unwrap_or_default();
+      let pkgs = get_available_pkgs();
       let selected_pkgs = cfg.packages.clone();
       let package_picker = PackagePicker::new(
         "Selected User Packages",
-        "Available Packages",
+        &available_pkgs_title(),
         selected_pkgs,
         pkgs,
       );
@@ -1703,12 +1719,13 @@ impl ConfigureHomeManager {
         package_picker,
         selected_user,
         confirming_disable: false,
+        pkg_generation: pkg_list_generation(),
       }
     } else {
       confirm_buttons.focus();
-      let pkgs = get_available_pkgs().unwrap_or_default();
+      let pkgs = get_available_pkgs();
       let package_picker =
-        PackagePicker::new("Selected User Packages", "Available Packages", vec![], pkgs);
+        PackagePicker::new("Selected User Packages", &available_pkgs_title(), vec![], pkgs);
       Self {
         confirmed: false,
         picking_pkgs: false,
@@ -1717,6 +1734,7 @@ impl ConfigureHomeManager {
         package_picker,
         selected_user,
         confirming_disable: false,
+        pkg_generation: pkg_list_generation(),
       }
     }
   }
@@ -1770,6 +1788,7 @@ impl Page for ConfigureHomeManager {
       info_box.render(f, vert_chunks[0]);
       self.confirm_buttons.render(f, hor_chunks[1]);
     } else if self.picking_pkgs {
+      self.sync_pkg_list();
       self.package_picker.render(f, area);
     } else {
       let table = installer.users.get(self.selected_user).map(|user| {

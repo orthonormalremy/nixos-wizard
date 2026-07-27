@@ -11,6 +11,90 @@ pub fn nixstr(val: impl ToString) -> String {
   let val = val.to_string();
   format!("\"{val}\"")
 }
+
+/// Used for `system.stateVersion` when the running release can't be detected,
+/// which normally means we aren't running on NixOS at all.
+const FALLBACK_STATE_VERSION: &str = "25.11";
+
+/// Detect the NixOS release series (e.g. `"26.11"`) of the live environment
+///
+/// `nixos-install` builds the target system from the live environment's
+/// nixpkgs, so the release we are installing *from* is the correct
+/// `system.stateVersion` for the system we are installing.
+pub fn detect_state_version() -> String {
+  let detected = nixos_version()
+    .as_deref()
+    .and_then(release_series)
+    .or_else(|| os_release_version_id().as_deref().and_then(release_series));
+
+  match detected {
+    Some(version) => {
+      log::debug!("Detected NixOS release series: {version}");
+      version
+    }
+    None => {
+      log::warn!(
+        "Could not detect the running NixOS release, falling back to {FALLBACK_STATE_VERSION}"
+      );
+      FALLBACK_STATE_VERSION.to_string()
+    }
+  }
+}
+
+/// Ask NixOS itself, e.g. `26.11pre1040357.e2587caef70c (Xantusia)`
+fn nixos_version() -> Option<String> {
+  let output = Command::new("nixos-version").output().ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Fall back to `VERSION_ID="26.11pre1040357.e2587caef70c"` in os-release
+///
+/// Only trusted when the file actually describes NixOS. Every distro ships an
+/// os-release, so reading `VERSION_ID` unconditionally would happily turn
+/// Ubuntu's `24.04` into a plausible-looking but completely wrong
+/// `system.stateVersion`.
+fn os_release_version_id() -> Option<String> {
+  let contents = std::fs::read_to_string("/etc/os-release").ok()?;
+
+  let mut id = None;
+  let mut version_id = None;
+  for line in contents.lines() {
+    if let Some(value) = line.strip_prefix("ID=") {
+      id = Some(unquote(value));
+    } else if let Some(value) = line.strip_prefix("VERSION_ID=") {
+      version_id = Some(unquote(value));
+    }
+  }
+
+  if id.as_deref() != Some("nixos") {
+    log::warn!("/etc/os-release is not NixOS (ID={id:?}), ignoring its VERSION_ID");
+    return None;
+  }
+  version_id
+}
+
+fn unquote(value: &str) -> String {
+  value.trim().trim_matches('"').to_string()
+}
+
+/// Pull the `<major>.<minor>` release series out of a full NixOS version string
+///
+/// Handles both channel builds (`26.11pre1040357.e2587caef70c`) and local
+/// builds (`26.11.20260723.e2587ca`); both yield `26.11`.
+fn release_series(raw: &str) -> Option<String> {
+  let (major, rest) = raw.trim().split_once('.')?;
+  if major.is_empty() || !major.bytes().all(|b| b.is_ascii_digit()) {
+    return None;
+  }
+  let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
+  if minor.is_empty() {
+    return None;
+  }
+  Some(format!("{major}.{minor}"))
+}
 /// Format Nix code using the nixfmt tool for proper indentation and style
 ///
 /// Assumes nixfmt is available in the environment (provided by the Nix flake)
@@ -193,44 +277,37 @@ impl NixWriter {
     }
     // Set up imports based on whether home-manager is needed
     let imports = if install_home_manager {
-      String::from(
-        r#"{imports = [ (import "${home-manager}/nixos") ./hardware-configuration.nix ];}"#,
-      )
+      String::from(r#"{imports = [ "${homeManagerSrc}/nixos" ./hardware-configuration.nix ];}"#)
     } else {
       String::from("{imports = [./hardware-configuration.nix];}")
     };
 
-    // Set the NixOS state version (required for all configurations)
+    // Set the NixOS state version (required for all configurations), matching
+    // the release of the live environment we're installing from
     let state_version = attrset! {
-      "system.stateVersion" = nixstr("25.11");
+      "system.stateVersion" = nixstr(detect_state_version());
     };
 
     // Combine all configuration attributes
     cfg_attrs = merge_attrs!(imports, cfg_attrs, state_version);
 
-    // Build let-binding declarations for external dependencies
-    let mut let_statement_declarations = vec![];
-    // Add home-manager dependency if any users need it
-    if install_home_manager {
-      let_statement_declarations.push(
-        "home-manager = builtins.fetchTarball https://github.com/nix-community/home-manager/archive/release-25.05.tar.gz;"
-      )
-    }
-
-    // Construct the let-in statement if we have dependencies
-    let let_stmt = if !let_statement_declarations.is_empty() {
-      let joined_stmts = let_statement_declarations.join(" ");
-      format!("let {joined_stmts} in ")
+    // Take home-manager from nixpkgs' own pinned copy rather than fetching a
+    // release branch ourselves: it's hash-pinned, substitutable from the binary
+    // cache, always the revision this nixpkgs was tested against, and it tracks
+    // the channel on later rebuilds - so there's no release string for us to
+    // keep up to date.
+    //
+    // It has to be bound in a `let` rather than read off the `pkgs` module
+    // argument: `imports` is resolved before module arguments exist, so
+    // referencing `pkgs` there is an infinite recursion.
+    let let_stmt = if install_home_manager {
+      "let homeManagerSrc = (import <nixpkgs> { }).home-manager.src; in "
     } else {
-      "".to_string()
+      ""
     };
 
     // Generate the final Nix function and format it
-    let raw = if install_home_manager {
-      format!("{{ config, pkgs, ... }}: {let_stmt} {cfg_attrs}")
-    } else {
-      format!("{{ config, pkgs, ... }}: {cfg_attrs}")
-    };
+    let raw = format!("{{ config, pkgs, ... }}: {let_stmt}{cfg_attrs}");
 
     // Format the generated Nix code for readability
     fmt_nix(raw)
@@ -610,10 +687,17 @@ impl NixWriter {
           let pkgs: Vec<String> = cfg.packages.iter().map(|s| s.to_string()).collect();
           format!("with pkgs; [ {} ]", pkgs.join(" "))
         };
+        // `home.stateVersion` is a closed enum with no default, so it can't be
+        // derived from the NixOS release - on an unstable system that release
+        // isn't in the enum yet and evaluation fails outright. Ask the pinned
+        // home-manager which release it *is* instead; that value is always a
+        // member of its own enum.
+        let hm_state_version =
+          r#"(builtins.fromJSON (builtins.readFile "${homeManagerSrc}/release.json")).release"#;
         let hm_config_body = attrset! {
           home = attrset! {
             packages = pkg_list;
-            stateVersion = nixstr("24.05");
+            stateVersion = hm_state_version;
           };
         };
         let hm_config_expr = format!("{{pkgs, ...}}: {hm_config_body}");

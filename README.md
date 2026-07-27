@@ -38,6 +38,7 @@ This project aims to help you get a bootable NixOS system as quickly and easily 
 * Must be run **as root**.
 * Designed to run inside the **NixOS live environment** built from the project’s flake or ISO. A prebuilt installer ISO is included with each release.
 * Depends on NixOS-specific tools like `nixos-install` and `nixos-generate-config` being available.
+* The package list is fetched at startup with `nix search nixpkgs`, which evaluates all of nixpkgs. Budget **at least 6GB of RAM** (it peaks near 5GB) or the search will be killed. The installer stays usable without it — you can type package names by hand — but give a VM 8GB if you want the picker populated.
 * A terminal emulator with proper color and Unicode support is recommended for best experience.
 * Running the binary directly may cause failures if necessary commands are not found in your environment. Ideally, this should be run using the flake output which wraps the program with all of the commands it needs for the installation process.
 
@@ -65,11 +66,14 @@ If running inside the included installer ISO:
 sudo nixos-wizard
 ```
 
-Alternatively, run the latest release from GitHub via Nix:
+Alternatively, run the latest release from GitHub via Nix. The official NixOS
+installer ISO doesn't enable flakes by default, so pass them explicitly:
 
 ```bash
-sudo nix run github:km-clay/nixos-wizard
+sudo nix --extra-experimental-features 'nix-command flakes' run github:km-clay/nixos-wizard
 ```
+
+`x86_64-linux` and `aarch64-linux` are both supported.
 
 ---
 
@@ -78,10 +82,18 @@ sudo nix run github:km-clay/nixos-wizard
 You can build a custom NixOS ISO image that includes `nixos-wizard` and all its dependencies pre-installed:
 
 ```bash
-nix build github:km-clay/nixos-wizard#nixosConfigurations.installerIso.config.system.build.isoImage
+# Builds an ISO for the architecture you're running on
+nix build github:km-clay/nixos-wizard#isoImage
+
+# Or name the architecture explicitly
+nix build github:km-clay/nixos-wizard#packages.aarch64-linux.isoImage
 ```
 
 Boot this ISO on your target machine to run the installer in a fully-supported live environment.
+
+Building an ISO for a different architecture than the host needs either a
+native remote builder or binfmt emulation
+(`boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`).
 
 ---
 

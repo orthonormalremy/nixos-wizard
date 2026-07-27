@@ -395,7 +395,7 @@ impl MenuPages {
       MenuPages::Kernels => Signal::Push(Box::new(Kernels::new())),
       MenuPages::SystemPackages => {
         // we actually need to go ask nixpkgs what packages it has now
-        let pkgs = get_available_pkgs().unwrap_or_default();
+        let pkgs = get_available_pkgs();
         Signal::Push(Box::new(SystemPackages::new(
           installer.system_pkgs.clone(),
           pkgs,
